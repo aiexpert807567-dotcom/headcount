@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hourly Headcount → Excel</title>
+<script src="schema.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+    --muted: #8a90a0;
+    --accent: #4f8cff;
+    --ok: #3ecf8e;
+    --warn: #f5a524;
+    --err: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tab-btn {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .tab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  textarea {
+    width: 100%; min-height: 220px; background: #0c0e13; color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-family: monospace;
+    font-size: 13px; resize: vertical;
+  }
+  input[type=file] { color: var(--muted); }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  button {
+    background: var(--accent); color: #fff; border: none; padding: 9px 16px;
+    border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600;
+  }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .msg { font-size: 13px; padding: 8px 10px; border-radius: 6px; margin-top: 10px; display: none; }
+  .msg.ok { background: rgba(62,207,142,0.12); color: var(--ok); display: block; }
+  .msg.warn { background: rgba(245,165,36,0.12); color: var(--warn); display: block; }
+  .msg.err { background: rgba(255,92,92,0.12); color: var(--err); display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  th, td { border: 1px solid var(--border); padding: 4px 6px; text-align: center; white-space: nowrap; }
+  th { background: #1d212b; position: sticky; top: 0; }
+  td.blank { color: #444; }
+  .out-wrap { overflow-x: auto; max-height: 340px; }
+  .flag { color: var(--warn); font-weight: 600; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal-backdrop.show { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; width: 420px; max-width: 92vw;
+  }
+  .modal h3 { margin: 0 0 8px; font-size: 15px; }
+  .modal p { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .modal select, .modal input[type=text] {
+    width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: #0c0e13; color: var(--text); margin-bottom: 10px; font-size: 13px;
+  }
+  .modal .row { justify-content: flex-end; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<h1>Hourly Headcount → Excel</h1>
+<div class="sub">Paste a WhatsApp report or upload the screenshot. Parse each message as it comes in — rows build up below — then copy everything once at the end. Duplicate entries for the same hour are detected and skipped automatically.</div>
+
+<div class="card">
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="text" onclick="switchTab('text')">Paste text</button>
+    <button class="tab-btn" data-tab="image" onclick="switchTab('image')">Upload image</button>
+  </div>
+
+  <div id="tab-text">
+    <textarea id="textInput" placeholder="Paste the WhatsApp message here..."></textarea>
+  </div>
+
+  <div id="tab-image" style="display:none;">
+    <input type="file" id="imageInput" accept="image/*" />
+    <div id="ocrStatus" class="msg"></div>
+  </div>
+
+  <div class="row">
+    <button onclick="runParse()">Parse &amp; Add row(s)</button>
+    <button class="secondary" onclick="clearInput()">Clear input</button>
+    <span id="parseMsg"></span>
+  </div>
+</div>
+
+<div class="card" id="resultsCard" style="display:none;">
+  <div class="row" style="justify-content: space-between;">
+    <strong>Accumulated rows — keep pasting more messages, then copy once at the end</strong>
+    <div class="row" style="margin:0;">
+      <button class="secondary" onclick="clearAccumulated()">Clear all rows</button>
+      <button onclick="copyTSV()">📋 Copy all for Excel</button>
+    </div>
+  </div>
+  <div id="statusMsg" class="msg"></div>
+  <div class="out-wrap">
+    <table id="outTable"></table>
+  </div>
+</div>
+
+<!-- Modal for resolving unknown locations / mismatched totals -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <h3 id="modalTitle">Needs your input</h3>
+    <p id="modalDesc"></p>
+    <select id="modalSelect"></select>
+    <input type="text" id="modalNewName" placeholder="Or type a new column name..." style="display:none;" />
+    <div class="row">
+      <button class="secondary" onclick="closeModal(null)">Skip this value</button>
+      <button onclick="submitModal()">Save & continue</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const ALIAS_KEY = "headcount_aliases_v1";
+
+function loadAliases() {
+  const stored = JSON.parse(localStorage.getItem(ALIAS_KEY) || "{}");
+  return Object.assign({}, SEED_ALIASES, stored);
+}
+function saveAlias(normKey, canonicalName) {
+  const stored = JSON.parse(localStorage.getItem(ALIAS_KEY) || "{}");
+  stored[normKey] = canonicalName;
+  localStorage.setItem(ALIAS_KEY, JSON.stringify(stored));
+}
+
+function switchTab(tab) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  document.getElementById("tab-text").style.display = tab === "text" ? "block" : "none";
+  document.getElementById("tab-image").style.display = tab === "image" ? "block" : "none";
+}
+
+function clearInput() {
+  document.getElementById("textInput").value = "";
+  document.getElementById("imageInput").value = "";
+  document.getElementById("parseMsg").textContent = "";
+}
+
+function clearAccumulated() {
+  accumulatedRows = [];
+  document.getElementById("resultsCard").style.display = "none";
+}
+
+// ---------- Parsing ----------
+
+// Matches time headers like:
+// "Time: 1800hrs -1900hrs", "Location: *1800 - 1900*", "18:00-19:00", "1800-1900"
+const TIME_HEADER_RE = /(?:time|location)?\s*:?\s*\**\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\s*[-–to]+\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\**/gi;
+
+const TOTAL_LINE_RE = /(?:grand\s*)?total\s*(?:headcount)?\s*[:=]\s*(\d{1,5})/i;
+const DATE_LINE_RE = /^date\b|\d{1,2}\/\d{1,2}\/\d{2,4}/i;
+const TRAILING_NUM_RE = /(\d{1,4})\s*$/;
+
+// Strips decoration (*, ●), then pulls the trailing number off the line and
+// treats everything before it (minus trailing : - =) as the location name.
+// This handles hyphenated names like "MS-01" and stray asterisks like
+// "*MS-01:* 02" that a single fixed regex can't cleanly cover.
+function parseLine(rawLine) {
+  let line = rawLine.replace(/\*/g, "").replace(/●/g, "").trim();
+  if (!line) return null;
+  if (DATE_LINE_RE.test(line)) return { type: "skip" };
+  const totalMatch = line.match(TOTAL_LINE_RE);
+  if (totalMatch) return { type: "total", value: parseInt(totalMatch[1], 10) };
+  const numMatch = line.match(TRAILING_NUM_RE);
+  if (!numMatch) return { type: "unmatched", line };
+  const num = parseInt(numMatch[1], 10);
+  let name = line.slice(0, numMatch.index).trim();
+  name = name.replace(/[:\-=\s]+$/, "").trim();
+  if (!name) return { type: "unmatched", line };
+  return { type: "loc", name, num };
+}
+
+function normalizeKeyLocal(str) {
+  return normalizeKey(str);
+}
+
+function hourLabel(h1, m1, h2, m2) {
+  const pad = n => String(n).padStart(2, "0");
+  // normalize "24:00"/"0000" wraparound for midnight end
+  const hh2 = (h2 === 0 && m2 === 0) ? "0000" : pad(h2) + pad(m2);
+  return `${pad(h1)}${pad(m1)}-${hh2}`;
+}
+
+function splitIntoSegments(raw) {
+  const segments = [];
+  let lastIndex = 0;
+  let lastLabel = null;
+  let match;
+  TIME_HEADER_RE.lastIndex = 0;
+  const matches = [];
+  while ((match = TIME_HEADER_RE.exec(raw)) !== null) {
+    matches.push(match);
+  }
+  if (matches.length === 0) {
+    segments.push({ label: null, body: raw });
+    return segments;
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    const label = hourLabel(+m[1], +m[2], +m[3], +m[4]);
+    const start = m.index + m[0].length;
+    const end = i + 1 < matches.length ? matches[i + 1].index : raw.length;
+    segments.push({ label, body: raw.slice(start, end) });
+  }
+  return segments;
+}
+
+// returns { rows: [...], flags: [...] }
+async function parseRaw(raw) {
+  const aliases = loadAliases();
+  const segments = splitIntoSegments(raw);
+  const rows = [];
+  const flags = [];
+
+  for (const seg of segments) {
+    const lines = seg.body.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const values = {}; // canonical name -> number
+    let statedTotal = null;
+    const unresolved = [];
+
+    for (const line of lines) {
+      const r = parseLine(line);
+      if (!r || r.type === "skip" || r.type === "unmatched") continue; // decorative lines, dates, "Regards" etc.
+      if (r.type === "total") {
+        statedTotal = r.value;
+        continue;
+      }
+      // r.type === "loc"
+      const key = normalizeKeyLocal(r.name);
+      const canonical = aliases[key];
+      if (canonical) {
+        values[canonical] = r.num;
+      } else {
+        unresolved.push({ rawName: r.name, key, num: r.num });
+      }
+    }
+
+    // Resolve unknowns interactively
+    for (const u of unresolved) {
+      const resolved = await promptForMapping(u.rawName, u.num, seg.label);
+      if (resolved) {
+        values[resolved] = u.num;
+        saveAlias(u.key, resolved);
+      } else {
+        flags.push(`Skipped unrecognized location "${u.rawName}" (${seg.label || "unknown hour"})`);
+      }
+    }
+
+    // Validate against stated total if present
+    if (statedTotal !== null) {
+      const sum = Object.values(values).reduce((a, b) => a + b, 0);
+      if (sum !== statedTotal) {
+        flags.push(`Total mismatch for ${seg.label || "segment"}: parsed sum = ${sum}, message says ${statedTotal}. Values kept as parsed — please double-check.`);
+      }
+    }
+
+    if (Object.keys(values).length > 0) {
+      rows.push({ label: seg.label || "(hour not detected)", values });
+    }
+  }
+
+  return { rows, flags };
+}
+
+// ---------- Modal for unknown locations ----------
+let modalResolve = null;
+function promptForMapping(rawName, num, hourLabelText) {
+  return new Promise(resolve => {
+    modalResolve = resolve;
+    document.getElementById("modalTitle").textContent = "Unrecognized location";
+    document.getElementById("modalDesc").textContent =
+      `Found "${rawName}" = ${num} (${hourLabelText || "hour unknown"}). It's not in the master list. What should it map to?`;
+    const sel = document.getElementById("modalSelect");
+    sel.innerHTML = "";
+    const optNew = document.createElement("option");
+    optNew.value = "__new__";
+    optNew.textContent = "— Add as a new column —";
+    sel.appendChild(optNew);
+    CANONICAL_LOCATIONS.forEach(loc => {
+      const o = document.createElement("option");
+      o.value = loc;
+      o.textContent = loc;
+      sel.appendChild(o);
+    });
+    document.getElementById("modalNewName").style.display = "none";
+    sel.onchange = () => {
+      document.getElementById("modalNewName").style.display = sel.value === "__new__" ? "block" : "none";
+    };
+    document.getElementById("modalBackdrop").classList.add("show");
+  });
+}
+function submitModal() {
+  const sel = document.getElementById("modalSelect");
+  let value = sel.value;
+  if (value === "__new__") {
+    const newName = document.getElementById("modalNewName").value.trim();
+    if (!newName) { alert("Type a name for the new column."); return; }
+    CANONICAL_LOCATIONS.push(newName); // extend schema for this session
+    value = newName;
+  }
+  closeModal(value);
+}
+function closeModal(value) {
+  document.getElementById("modalBackdrop").classList.remove("show");
+  if (modalResolve) { modalResolve(value); modalResolve = null; }
+}
+
+// ---------- Accumulation, merging, and duplicate detection ----------
+// Rows persist across multiple "Parse & Add" calls so you can feed in
+// several messages before copying once at the end.
+let accumulatedRows = []; // [{ label: "1800-1900", values: { "Russian": 9, ... } }]
+
+// Merges newly parsed rows into the running accumulated list:
+// - Same hour + same location + same number  -> exact duplicate, skipped.
+// - Same hour + same location + different number -> conflict, flagged
+//   (existing value is kept, since we can't silently guess which is right).
+// - Same hour + a location not seen yet for that hour -> merged in
+//   (this is the normal case: different sector messages covering the
+//   same hour but different locations).
+// - New hour entirely -> added as a new row.
+function mergeRows(newRows) {
+  const mergeFlags = [];
+  newRows.forEach(newRow => {
+    const existing = accumulatedRows.find(r => r.label === newRow.label);
+    if (!existing) {
+      accumulatedRows.push({ label: newRow.label, values: { ...newRow.values } });
+      return;
+    }
+    Object.entries(newRow.values).forEach(([loc, num]) => {
+      if (!(loc in existing.values)) {
+        existing.values[loc] = num;
+      } else if (existing.values[loc] === num) {
+        mergeFlags.push(`Duplicate entry skipped: ${loc} at ${newRow.label} = ${num} (already recorded).`);
+      } else {
+        mergeFlags.push(`Conflict at ${newRow.label} for ${loc}: kept existing value ${existing.values[loc]}, ignored new value ${num} — please verify which is correct.`);
+      }
+    });
+  });
+  // Keep rows sorted by hour for readability
+  accumulatedRows.sort((a, b) => a.label.localeCompare(b.label));
+  return mergeFlags;
+}
+
+function renderRows(flags) {
+  const card = document.getElementById("resultsCard");
+  const statusEl = document.getElementById("statusMsg");
+  card.style.display = "block";
+
+  if (flags.length) {
+    statusEl.className = "msg warn";
+    statusEl.innerHTML = flags.map(f => `⚠ ${f}`).join("<br>");
+  } else {
+    statusEl.className = "msg ok";
+    statusEl.textContent = `${accumulatedRows.length} hour row(s) so far — no discrepancies. Paste the next message, or copy when done.`;
+  }
+
+  const table = document.getElementById("outTable");
+  let html = "<tr><th>Hour</th>" + CANONICAL_LOCATIONS.map(l => `<th>${l}</th>`).join("") + "<th>Total</th></tr>";
+  accumulatedRows.forEach(r => {
+    let sum = 0;
+    html += `<tr><td>${r.label}</td>`;
+    CANONICAL_LOCATIONS.forEach(loc => {
+      const v = r.values[loc];
+      if (v === undefined) {
+        html += `<td class="blank">—</td>`;
+      } else {
+        sum += v;
+        html += `<td>${v}</td>`;
+      }
+    });
+    html += `<td><strong>${sum}</strong></td></tr>`;
+  });
+  table.innerHTML = html;
+}
+
+function copyTSV() {
+  const header = ["Hour", ...CANONICAL_LOCATIONS, "Total"].join("\t");
+  const lines = [header];
+  accumulatedRows.forEach(r => {
+    let sum = 0;
+    const cells = [r.label];
+    CANONICAL_LOCATIONS.forEach(loc => {
+      const v = r.values[loc];
+      if (v === undefined) { cells.push(""); }
+      else { cells.push(v); sum += v; }
+    });
+    cells.push(sum);
+    lines.push(cells.join("\t"));
+  });
+  navigator.clipboard.writeText(lines.join("\n")).then(() => {
+    const btn = event.target;
+    const old = btn.textContent;
+    btn.textContent = "✓ Copied!";
+    setTimeout(() => (btn.textContent = old), 1500);
+  });
+}
+
+async function runParse() {
+  const activeTab = document.querySelector(".tab-btn.active").dataset.tab;
+  const msgEl = document.getElementById("parseMsg");
+  let raw = "";
+
+  if (activeTab === "text") {
+    raw = document.getElementById("textInput").value;
+    if (!raw.trim()) { msgEl.textContent = "Paste a message first."; return; }
+  } else {
+    const file = document.getElementById("imageInput").files[0];
+    if (!file) { msgEl.textContent = "Choose an image first."; return; }
+    raw = await runOCR(file); // OCR + auto-clean happen inside runOCR
+    if (!raw) return;
+  }
+
+  msgEl.textContent = "Parsing...";
+  const { rows, flags: parseFlags } = await parseRaw(raw);
+  if (rows.length === 0) {
+    msgEl.textContent = "Couldn't find any recognizable rows in this message. Check the format and try again.";
+    return;
+  }
+  const mergeFlags = mergeRows(rows);
+  msgEl.textContent = "";
+  renderRows([...parseFlags, ...mergeFlags]);
+
+  // Clear the input so the next message can be pasted straight in.
+  if (activeTab === "text") {
+    document.getElementById("textInput").value = "";
+  } else {
+    document.getElementById("imageInput").value = "";
+    document.getElementById("ocrStatus").textContent = "";
+  }
+}
+
+// ---------- OCR (image mode) ----------
+// Configure this once you deploy worker.js — see README for steps.
+const WORKER_URL = ""; // e.g. "https://headcount-cleaner.yourname.workers.dev"
+
+async function runOCR(file) {
+  const statusEl = document.getElementById("ocrStatus");
+  statusEl.className = "msg warn";
+  statusEl.textContent = "Reading image (OCR)...";
+  let text;
+  try {
+    const { data } = await Tesseract.recognize(file, "eng");
+    text = data.text;
+  } catch (e) {
+    statusEl.className = "msg err";
+    statusEl.textContent = "OCR failed: " + e.message;
+    return null;
+  }
+
+  if (!WORKER_URL) {
+    statusEl.className = "msg ok";
+    statusEl.textContent = "OCR done (Worker not configured — using raw OCR text as-is).";
+    return text;
+  }
+
+  statusEl.className = "msg warn";
+  statusEl.textContent = "OCR done. Auto-cleaning with AI...";
+  try {
+    const res = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw: text, canonicalLocations: CANONICAL_LOCATIONS }),
+    });
+    const data = await res.json();
+    statusEl.className = "msg ok";
+    statusEl.textContent = "OCR + AI cleanup done.";
+    return data.cleaned || text;
+  } catch (e) {
+    statusEl.className = "msg warn";
+    statusEl.textContent = "AI cleanup failed, falling back to raw OCR text: " + e.message;
+    return text;
+  }
+}
+</script>
+</body>
+</html>
