@@ -86,7 +86,7 @@
 <body>
 
 <h1>Hourly Headcount → Excel</h1>
-<div class="sub">Paste a WhatsApp report or upload the screenshot. Parse each message as it comes in rows build up below then copy everything once at the end. Duplicate entries for the same hour are detected and skipped automatically.</div>
+<div class="sub">Paste a WhatsApp report or upload the screenshot. Parse each message as it comes in — rows build up below — then copy everything once at the end. Duplicate entries for the same hour are detected and skipped automatically.</div>
 
 <div class="card">
   <div class="tabs">
@@ -112,9 +112,10 @@
 
 <div class="card" id="resultsCard" style="display:none;">
   <div class="row" style="justify-content: space-between;">
-    <strong>Accumulated rows keep pasting more messages, then copy once at the end</strong>
+    <strong>Accumulated rows — keep pasting more messages, then copy once at the end</strong>
     <div class="row" style="margin:0;">
       <button class="secondary" onclick="clearAccumulated()">Clear all rows</button>
+      <input type="number" id="startRowInput" placeholder="Starting Excel row #" style="width:150px; padding:8px; border-radius:6px; border:1px solid var(--border); background:#0c0e13; color:var(--text); font-size:13px;" />
       <button onclick="copyTSV()">📋 Copy all for Excel</button>
     </div>
   </div>
@@ -468,14 +469,27 @@ function renderRows(flags) {
 }
 
 function copyTSV() {
+  const startRowRaw = document.getElementById("startRowInput").value.trim();
+  const startRow = startRowRaw ? parseInt(startRowRaw, 10) : null;
+
   const lines = [];
-  accumulatedRows.forEach(r => {
+  accumulatedRows.forEach((r, i) => {
     const cells = [];
+    const rowNum = startRow !== null ? startRow + i : null;
     CANONICAL_LOCATIONS.forEach(loc => {
       const v = r.values[loc];
       cells.push(v === undefined ? "" : v);
       if (loc === GAP_AFTER_LOCATION) {
-        for (let i = 0; i < GAP_CELL_COUNT; i++) cells.push(""); // skip Total column + spacer column
+        // First gap cell = column K = the block-1 Total. Regenerate the
+        // real formula for this exact row if we know the row number;
+        // otherwise leave it blank (safer than guessing a wrong row).
+        if (rowNum !== null) {
+          cells.push(`=SUM(B${rowNum}:J${rowNum})`);
+        } else {
+          cells.push("");
+        }
+        // Second gap cell = column L = genuine blank spacer, always blank.
+        for (let i2 = 1; i2 < GAP_CELL_COUNT; i2++) cells.push("");
       }
     });
     lines.push(cells.join("\t"));
@@ -488,8 +502,12 @@ function copyTSV() {
   navigator.clipboard.writeText(lines.join("\n")).then(() => {
     btn.textContent = "✓ Copied!";
     statusEl.className = "msg ok";
-    statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s) to clipboard. In Excel, use <strong>Paste Special → Skip Blanks</strong> (Ctrl+Alt+V) — a normal paste will erase your Total formula cells, Skip Blanks protects them.`;
-    setTimeout(() => { btn.textContent = oldBtnText; }, 2000);
+    if (startRow !== null) {
+      statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s) — Total formulas regenerated for rows ${startRow}–${startRow + accumulatedRows.length - 1}. Still use <strong>Paste Special → Skip Blanks</strong> for column L.`;
+    } else {
+      statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s). Enter a starting row number above to also regenerate your Total formula — otherwise column K is left blank and you must use <strong>Paste Special → Skip Blanks</strong> to protect it.`;
+    }
+    setTimeout(() => { btn.textContent = oldBtnText; }, 2500);
   }).catch(err => {
     statusEl.className = "msg err";
     statusEl.textContent = "Copy failed: " + err.message + " — try selecting and copying manually, or check your browser's clipboard permission.";
