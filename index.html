@@ -468,11 +468,10 @@ function renderRows(flags) {
 }
 
 function copyTSV() {
-  const header = ["Hour", ...CANONICAL_LOCATIONS, "Total"].join("\t");
-  const lines = [header];
+  const lines = [];
   accumulatedRows.forEach(r => {
     let sum = 0;
-    const cells = [r.label];
+    const cells = [];
     CANONICAL_LOCATIONS.forEach(loc => {
       const v = r.values[loc];
       if (v === undefined) { cells.push(""); }
