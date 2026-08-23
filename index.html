@@ -171,8 +171,16 @@ function clearAccumulated() {
 // ---------- Parsing ----------
 
 // Matches time headers like:
-// "Time: 1800hrs -1900hrs", "Location: *1800 - 1900*", "18:00-19:00", "1800-1900"
-const TIME_HEADER_RE = /(?:time|location)?\s*:?\s*\**\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\s*[-–to]+\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\**/gi;
+// "Time: 1800hrs -1900hrs", "Location: *1800 - 1900*"
+// The "Time"/"Location" keyword is REQUIRED — without it, a bare
+// "06:00 to 07:00" would collide with the per-line hour+value format
+// used in the "location name, then a list of hour = number" reports.
+const TIME_HEADER_RE = /(?:time|location)\s*:?\s*\**\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\s*(?:-|–|to)\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\**/gi;
+
+// Matches a standalone "06:00 to 07:00 = 65" line — used by the
+// location-name-then-hourly-values report format.
+const HOUR_VALUE_LINE_RE = /^(\d{1,2}):?(\d{2})\s*(?:to|-|–)\s*(\d{1,2}):?(\d{2})\s*=\s*(\d{1,4})$/i;
+const SECTION_TITLE_RE = /sustainability/i;
 
 const TOTAL_LINE_RE = /(?:grand\s*)?total\s*(?:headcount)?\s*[:=]\s*(\d{1,5})/i;
 const DATE_LINE_RE = /^date\b|\d{1,2}\/\d{1,2}\/\d{2,4}/i;
@@ -199,6 +207,61 @@ function parseLine(rawLine) {
 
 function normalizeKeyLocal(str) {
   return normalizeKey(str);
+}
+
+// Detects the "LocationName" header followed by a run of
+// "HH:MM to HH:MM = NN" lines format. Requires at least 3 matching
+// hour-value lines to be confident this isn't just a stray line.
+function looksLikeLocationTimeSeries(raw) {
+  const lines = raw.split(/\r?\n/).map(l => l.replace(/\*/g, "").trim()).filter(Boolean);
+  const hits = lines.filter(l => HOUR_VALUE_LINE_RE.test(l)).length;
+  return hits >= 3;
+}
+
+// Parses the location-time-series format: a location name on its own
+// line, followed by one or more "HH:MM to HH:MM = NN" lines for that
+// location, repeating for each location in the message.
+async function parseLocationTimeSeries(raw) {
+  const aliases = loadAliases();
+  const lines = raw.split(/\r?\n/).map(l => l.replace(/\*/g, "").trim()).filter(Boolean);
+  const byHour = {}; // hourLabel -> { canonicalName: num }
+  const flags = [];
+  let currentCanonical = null;
+  let pendingRawName = null;
+
+  for (const line of lines) {
+    if (SECTION_TITLE_RE.test(line)) continue; // e.g. "Sustainability 06:00 to 12:00" divider
+    const hv = line.match(HOUR_VALUE_LINE_RE);
+    if (hv) {
+      const label = hourLabel(+hv[1], +hv[2], +hv[3], +hv[4]);
+      const num = parseInt(hv[5], 10);
+      if (!currentCanonical) {
+        flags.push(`Value ${num} at ${label} had no recognized location header above it — skipped.`);
+        continue;
+      }
+      if (!byHour[label]) byHour[label] = {};
+      byHour[label][currentCanonical] = num;
+      continue;
+    }
+    // Not an hour-value line and not a section divider -> a location name header
+    const key = normalizeKeyLocal(line);
+    const canonical = aliases[key];
+    if (canonical) {
+      currentCanonical = canonical;
+    } else {
+      const resolved = await promptForMapping(line, "(applies to following hours)", null);
+      if (resolved) {
+        currentCanonical = resolved;
+        saveAlias(key, resolved);
+      } else {
+        currentCanonical = null;
+        flags.push(`Skipped unrecognized location "${line}" and its hourly values.`);
+      }
+    }
+  }
+
+  const rows = Object.entries(byHour).map(([label, values]) => ({ label, values }));
+  return { rows, flags };
 }
 
 function hourLabel(h1, m1, h2, m2) {
@@ -234,6 +297,10 @@ function splitIntoSegments(raw) {
 
 // returns { rows: [...], flags: [...] }
 async function parseRaw(raw) {
+  if (looksLikeLocationTimeSeries(raw)) {
+    return parseLocationTimeSeries(raw);
+  }
+
   const aliases = loadAliases();
   const segments = splitIntoSegments(raw);
   const rows = [];
@@ -458,7 +525,7 @@ async function runParse() {
 
 // ---------- OCR (image mode) ----------
 // Configure this once you deploy worker.js — see README for steps.
-const WORKER_URL = "https://headcount-cleaner.velora-dune-arsalan.workers.dev"; // e.g. "https://headcount-cleaner.yourname.workers.dev"
+const WORKER_URL = "https://headcount-cleaner.velora-dune-arsalan.workers.dev";
 
 async function runOCR(file) {
   const statusEl = document.getElementById("ocrStatus");

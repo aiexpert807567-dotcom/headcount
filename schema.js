@@ -83,6 +83,11 @@ const SEED_ALIASES = {
   "ALW4": "ALW 4",
   "ALWASL": "ALW 2", // ambiguous on its own — will still prompt if unresolved
   "SALESCENTER": "Sales Center",
+  "SALECENTER": "Sales Center",
+  "ARRIVALPLAZA": "SUS PSA",
+  "TERRAAPARKING": "Terra A",
+  "ALWASLAVENUE": "Metro", // ground-team confirmed: mislabeled Metro in Sustainability reports
+  "SS06": "Sales Center", // per ground-team confirmation: SS-06 refers to Sales Center
   "SA01": "SA01",
   "SA02": "SA02",
   "SA03": "SA03",

@@ -38,20 +38,30 @@ export default {
       return json({ error: "Expected { raw: string, canonicalLocations: string[] }" }, 400);
     }
 
-    const systemPrompt = `You clean up messy OCR text from a visitor-headcount table.
+    const systemPrompt = `You clean up messy OCR text from a visitor-headcount screenshot.
+The screenshots are Excel tables. Locations are rows, hours (00:00-01:00
+through 23:00-00:00) are columns, and the last column is a Total per row.
+Some tables are only partially filled in during the day — later hour
+columns are genuinely blank because that data hasn't been reported yet,
+not because it's zero.
+
 Rules — follow strictly, do not deviate:
 1. Only use these exact location names, nothing else: ${canonicalLocations.join(", ")}.
 2. If OCR text refers to a location NOT in that list, keep the original text as-is (do not rename it) so the app can flag it.
-3. Output one "Time: HHMMhrs-HHMMhrs" header line per hour block, then one "LocationName - Number" line per location found for that hour.
-4. If a number is unreadable/ambiguous, output "?" instead of guessing a digit.
-5. Never invent a location or number that is not actually present in the input.
-6. Output plain text only — no commentary, no markdown, no explanations.`;
+3. Output one "Time: HHMMhrs-HHMMhrs" header line per hour block, then one "LocationName - Number" line per location that has an actual visible number for that hour.
+4. A BLANK cell in the source table means "not reported yet" — do NOT output a line for it, and NEVER write 0 or any other number for a cell you cannot actually see a digit in. Omitting the line entirely is correct; guessing a number is not.
+5. If a number is genuinely present but the digits are ambiguous/unreadable, output "?" instead of guessing a digit.
+6. Never invent a location, hour, or number that is not actually visible in the input.
+7. Do not increase or decrease the number of hour columns beyond what's visible in the source — if only 6 columns of a 24-column table are filled, output only those 6 hour blocks.
+8. Output plain text only — no commentary, no markdown, no explanations, no summary at the end.`;
 
     const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: raw },
       ],
+      temperature: 0,
+      max_tokens: 2048,
     });
 
     const cleaned = response?.response || "";
