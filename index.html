@@ -480,11 +480,19 @@ function copyTSV() {
     });
     lines.push(cells.join("\t"));
   });
+
+  const statusEl = document.getElementById("statusMsg");
+  const btn = event.target;
+  const oldBtnText = btn.textContent;
+
   navigator.clipboard.writeText(lines.join("\n")).then(() => {
-    const btn = event.target;
-    const old = btn.textContent;
     btn.textContent = "✓ Copied!";
-    setTimeout(() => (btn.textContent = old), 1500);
+    statusEl.className = "msg ok";
+    statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s) to clipboard. In Excel, use <strong>Paste Special → Skip Blanks</strong> (Ctrl+Alt+V) — a normal paste will erase your Total formula cells, Skip Blanks protects them.`;
+    setTimeout(() => { btn.textContent = oldBtnText; }, 2000);
+  }).catch(err => {
+    statusEl.className = "msg err";
+    statusEl.textContent = "Copy failed: " + err.message + " — try selecting and copying manually, or check your browser's clipboard permission.";
   });
 }
 
