@@ -41,11 +41,13 @@ const CANONICAL_LOCATIONS = [
   "MS02",
 ];
 
-// Your sheet has a blank spacer column between the two location groups —
-// after "Alif B (VC07)" (its TOTAL column K) comes a blank column L, then
-// "Latifa PG" starts the second group at M. This marks where that gap goes
-// when building the copy-paste output.
+// Your sheet has TWO columns to skip between the two location groups:
+// column K holds your own Total formula for the first group (never write
+// there), and column L is a genuinely blank spacer column. Latifa PG then
+// starts the second group at M. So after "Alif B (VC07)"'s value, two
+// blank cells go into the copy output before Latifa PG's value.
 const GAP_AFTER_LOCATION = "Alif B (VC07)";
+const GAP_CELL_COUNT = 2;
 
 // Normalizer: strips spaces, hyphens, apostrophes, parens, asterisks, dots,
 // uppercases. Used both to seed aliases below and to match incoming text.
@@ -118,5 +120,5 @@ const SEED_ALIASES = {
 };
 
 if (typeof module !== "undefined") {
-  module.exports = { CANONICAL_LOCATIONS, SEED_ALIASES, normalizeKey, GAP_AFTER_LOCATION };
+  module.exports = { CANONICAL_LOCATIONS, SEED_ALIASES, normalizeKey, GAP_AFTER_LOCATION, GAP_CELL_COUNT };
 }

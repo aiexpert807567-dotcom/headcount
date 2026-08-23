@@ -475,7 +475,7 @@ function copyTSV() {
       const v = r.values[loc];
       cells.push(v === undefined ? "" : v);
       if (loc === GAP_AFTER_LOCATION) {
-        cells.push(""); // blank spacer column matching the real sheet's gap
+        for (let i = 0; i < GAP_CELL_COUNT; i++) cells.push(""); // skip Total column + spacer column
       }
     });
     lines.push(cells.join("\t"));
