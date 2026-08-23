@@ -470,14 +470,14 @@ function renderRows(flags) {
 function copyTSV() {
   const lines = [];
   accumulatedRows.forEach(r => {
-    let sum = 0;
     const cells = [];
     CANONICAL_LOCATIONS.forEach(loc => {
       const v = r.values[loc];
-      if (v === undefined) { cells.push(""); }
-      else { cells.push(v); sum += v; }
+      cells.push(v === undefined ? "" : v);
+      if (loc === GAP_AFTER_LOCATION) {
+        cells.push(""); // blank spacer column matching the real sheet's gap
+      }
     });
-    cells.push(sum);
     lines.push(cells.join("\t"));
   });
   navigator.clipboard.writeText(lines.join("\n")).then(() => {

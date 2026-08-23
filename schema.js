@@ -41,6 +41,12 @@ const CANONICAL_LOCATIONS = [
   "MS02",
 ];
 
+// Your sheet has a blank spacer column between the two location groups —
+// after "Alif B (VC07)" (its TOTAL column K) comes a blank column L, then
+// "Latifa PG" starts the second group at M. This marks where that gap goes
+// when building the copy-paste output.
+const GAP_AFTER_LOCATION = "Alif B (VC07)";
+
 // Normalizer: strips spaces, hyphens, apostrophes, parens, asterisks, dots,
 // uppercases. Used both to seed aliases below and to match incoming text.
 function normalizeKey(str) {
@@ -112,5 +118,5 @@ const SEED_ALIASES = {
 };
 
 if (typeof module !== "undefined") {
-  module.exports = { CANONICAL_LOCATIONS, SEED_ALIASES, normalizeKey };
+  module.exports = { CANONICAL_LOCATIONS, SEED_ALIASES, normalizeKey, GAP_AFTER_LOCATION };
 }
