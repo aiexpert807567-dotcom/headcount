@@ -19,26 +19,31 @@
 
 export default {
   async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
-    }
-    if (request.method !== "POST") {
-      return json({ error: "POST only" }, 405);
-    }
-
-    let body;
     try {
-      body = await request.json();
-    } catch {
-      return json({ error: "Invalid JSON body" }, 400);
-    }
+      if (request.method === "OPTIONS") {
+        return new Response(null, { headers: corsHeaders() });
+      }
+      if (request.method !== "POST") {
+        return json({ error: "POST only" }, 405);
+      }
 
-    const { raw, canonicalLocations } = body;
-    if (!raw || !Array.isArray(canonicalLocations)) {
-      return json({ error: "Expected { raw: string, canonicalLocations: string[] }" }, 400);
-    }
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
 
-    const systemPrompt = `You clean up messy OCR text from a visitor-headcount screenshot.
+      const { raw, canonicalLocations } = body;
+      if (!raw || !Array.isArray(canonicalLocations)) {
+        return json({ error: "Expected { raw: string, canonicalLocations: string[] }" }, 400);
+      }
+
+      // Wide table OCR output can be very long and noisy — cap it so the
+      // model call doesn't fail on context length or take too long.
+      const trimmedRaw = raw.length > 6000 ? raw.slice(0, 6000) : raw;
+
+      const systemPrompt = `You clean up messy OCR text from a visitor-headcount screenshot.
 The screenshots are Excel tables. Locations are rows, hours (00:00-01:00
 through 23:00-00:00) are columns, and the last column is a Total per row.
 Some tables are only partially filled in during the day — later hour
@@ -55,17 +60,24 @@ Rules — follow strictly, do not deviate:
 7. Do not increase or decrease the number of hour columns beyond what's visible in the source — if only 6 columns of a 24-column table are filled, output only those 6 hour blocks.
 8. Output plain text only — no commentary, no markdown, no explanations, no summary at the end.`;
 
-    const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: raw },
-      ],
-      temperature: 0,
-      max_tokens: 2048,
-    });
+      const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: trimmedRaw },
+        ],
+        temperature: 0,
+        max_tokens: 2048,
+      });
 
-    const cleaned = response?.response || "";
-    return json({ cleaned }, 200);
+      const cleaned = response?.response || "";
+      return json({ cleaned }, 200);
+    } catch (err) {
+      // Any failure (AI call error, quota limit, bad input, etc.) still
+      // returns real JSON with CORS headers instead of crashing — a crash
+      // with no CORS headers is what shows up client-side as a generic
+      // "Failed to fetch" with no useful detail.
+      return json({ error: "Worker error: " + (err && err.message ? err.message : String(err)) }, 500);
+    }
   },
 };
 
