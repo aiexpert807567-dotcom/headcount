@@ -1,13 +1,9 @@
 /**
- * Cloudflare Worker — OCR cleanup step.
- *
- * The frontend never guesses numbers itself here — this Worker's only job
- * is to take messy raw OCR text (misread spacing, broken table lines, stray
- * characters) and reformat it into clean "Location - Number" lines with a
- * "Time: Xhrs-Yhrs" header per hour block, using the SAME canonical location
- * names the frontend already knows about. It does NOT invent, guess, or fill
- * in missing numbers — if a number is unreadable, it leaves it as "?" so the
- * frontend's strict parser flags it for you instead of silently being wrong.
+ * Cloudflare Worker — reads a visitor-headcount screenshot directly using
+ * a vision model, skipping OCR entirely. OCR-then-clean-up was compounding
+ * errors: OCR garbled dense grid tables, then the text model had no way to
+ * recover from already-corrupted input. Reading the image directly avoids
+ * that whole failure mode.
  *
  * Deploy:
  *   wrangler.toml needs:
@@ -34,48 +30,45 @@ export default {
         return json({ error: "Invalid JSON body" }, 400);
       }
 
-      const { raw, canonicalLocations } = body;
-      if (!raw || !Array.isArray(canonicalLocations)) {
-        return json({ error: "Expected { raw: string, canonicalLocations: string[] }" }, 400);
+      const { image, canonicalLocations } = body;
+      if (!image || !Array.isArray(canonicalLocations)) {
+        return json({ error: "Expected { image: base64 data URL, canonicalLocations: string[] }" }, 400);
       }
 
-      // Wide table OCR output can be very long and noisy — cap it so the
-      // model call doesn't fail on context length or take too long.
-      const trimmedRaw = raw.length > 6000 ? raw.slice(0, 6000) : raw;
-
-      const systemPrompt = `You clean up messy OCR text from a visitor-headcount screenshot.
-The screenshots are Excel tables. Locations are rows, hours (00:00-01:00
-through 23:00-00:00) are columns, and the last column is a Total per row.
+      const systemPrompt = `You read visitor-headcount screenshots of Excel tables.
+Locations are rows, hours (00:00-01:00 through 23:00-00:00) are columns,
+and there may be a Total column per row — ignore Total columns entirely.
 Some tables are only partially filled in during the day — later hour
 columns are genuinely blank because that data hasn't been reported yet,
 not because it's zero.
 
 Rules — follow strictly, do not deviate:
 1. Only use these exact location names, nothing else: ${canonicalLocations.join(", ")}.
-2. If OCR text refers to a location NOT in that list, keep the original text as-is (do not rename it) so the app can flag it.
-3. Output one "Time: HHMMhrs-HHMMhrs" header line per hour block, then one "LocationName - Number" line per location that has an actual visible number for that hour.
-4. A BLANK cell in the source table means "not reported yet" — do NOT output a line for it, and NEVER write 0 or any other number for a cell you cannot actually see a digit in. Omitting the line entirely is correct; guessing a number is not.
+2. If a row's label in the image doesn't match one of those names, keep the label exactly as written in the image (do not rename or guess a match) so the app can flag it for the user.
+3. Output one "Time: HHMMhrs-HHMMhrs" header line per hour column that has at least one visible number in it, then one "LocationName - Number" line per location that has an actual visible number for that hour.
+4. A BLANK or empty cell in the image means "not reported yet" — do NOT output a line for it, and NEVER write 0 or any other number for a cell you cannot actually see a digit in. Omitting the line entirely is correct; guessing a number is not.
 5. If a number is genuinely present but the digits are ambiguous/unreadable, output "?" instead of guessing a digit.
-6. Never invent a location, hour, or number that is not actually visible in the input.
-7. Do not increase or decrease the number of hour columns beyond what's visible in the source — if only 6 columns of a 24-column table are filled, output only those 6 hour blocks.
-8. Output plain text only — no commentary, no markdown, no explanations, no summary at the end.`;
+6. Never invent a location, hour column, or number that is not actually visible in the image.
+7. Ignore Total/subtotal columns and rows completely — never output a line for them.
+8. Output plain text only — no commentary, no markdown, no explanations, no summary, no description of the image.`;
 
-      const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: trimmedRaw },
-        ],
-        temperature: 0,
+      const messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: "Read the visitor-headcount table in this image and output it in the required format." },
+      ];
+
+      const response = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
+        messages,
+        image,
         max_tokens: 2048,
       });
 
       const cleaned = response?.response || "";
       return json({ cleaned }, 200);
     } catch (err) {
-      // Any failure (AI call error, quota limit, bad input, etc.) still
-      // returns real JSON with CORS headers instead of crashing — a crash
-      // with no CORS headers is what shows up client-side as a generic
-      // "Failed to fetch" with no useful detail.
+      // Any failure still returns real JSON with CORS headers instead of
+      // crashing — a crash with no CORS headers shows up client-side as a
+      // generic "Failed to fetch" with no useful detail.
       return json({ error: "Worker error: " + (err && err.message ? err.message : String(err)) }, 500);
     }
   },

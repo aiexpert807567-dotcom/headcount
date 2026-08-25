@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Hourly Headcount → Excel</title>
 <script src="schema.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
   :root {
     --bg: #0f1115;
@@ -525,7 +524,7 @@ async function runParse() {
   } else {
     const file = document.getElementById("imageInput").files[0];
     if (!file) { msgEl.textContent = "Choose an image first."; return; }
-    raw = await runOCR(file); // OCR + auto-clean happen inside runOCR
+    raw = await runImageRead(file); // direct vision-model read, no OCR step
     if (!raw) return;
   }
 
@@ -548,46 +547,59 @@ async function runParse() {
   }
 }
 
-// ---------- OCR (image mode) ----------
+// ---------- Image mode: read the screenshot directly via a vision model ----------
 // Configure this once you deploy worker.js — see README for steps.
 const WORKER_URL = "https://headcount-cleaner.velora-dune-arsalan.workers.dev";
 
-async function runOCR(file) {
+function fileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function runImageRead(file) {
   const statusEl = document.getElementById("ocrStatus");
-  statusEl.className = "msg warn";
-  statusEl.textContent = "Reading image (OCR)...";
-  let text;
-  try {
-    const { data } = await Tesseract.recognize(file, "eng");
-    text = data.text;
-  } catch (e) {
+
+  if (!WORKER_URL) {
     statusEl.className = "msg err";
-    statusEl.textContent = "OCR failed: " + e.message;
+    statusEl.textContent = "Image reading requires the Worker to be deployed and WORKER_URL set — see README.";
     return null;
   }
 
-  if (!WORKER_URL) {
-    statusEl.className = "msg ok";
-    statusEl.textContent = "OCR done (Worker not configured — using raw OCR text as-is).";
-    return text;
+  statusEl.className = "msg warn";
+  statusEl.textContent = "Reading table image with AI...";
+
+  let dataUrl;
+  try {
+    dataUrl = await fileToDataURL(file);
+  } catch (e) {
+    statusEl.className = "msg err";
+    statusEl.textContent = "Couldn't read the file: " + e.message;
+    return null;
   }
 
-  statusEl.className = "msg warn";
-  statusEl.textContent = "OCR done. Auto-cleaning with AI...";
   try {
     const res = await fetch(WORKER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ raw: text, canonicalLocations: CANONICAL_LOCATIONS }),
+      body: JSON.stringify({ image: dataUrl, canonicalLocations: CANONICAL_LOCATIONS }),
     });
     const data = await res.json();
+    if (data.error) {
+      statusEl.className = "msg err";
+      statusEl.textContent = "AI read failed: " + data.error;
+      return null;
+    }
     statusEl.className = "msg ok";
-    statusEl.textContent = "OCR + AI cleanup done.";
-    return data.cleaned || text;
+    statusEl.textContent = "Image read successfully.";
+    return data.cleaned || "";
   } catch (e) {
-    statusEl.className = "msg warn";
-    statusEl.textContent = "AI cleanup failed, falling back to raw OCR text: " + e.message;
-    return text;
+    statusEl.className = "msg err";
+    statusEl.textContent = "Request to Worker failed: " + e.message;
+    return null;
   }
 }
 </script>
