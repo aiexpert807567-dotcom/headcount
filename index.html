@@ -133,7 +133,7 @@
 <body>
 
 <h1>Hourly Headcount → Excel</h1>
-<div class="sub">Paste a WhatsApp report or upload the screenshot. Parse each message as it comes in — rows build up below — then copy everything once at the end. Duplicate entries for the same hour are detected and skipped automatically.</div>
+<div class="sub">Paste a WhatsApp report or upload the screenshot. Parse each message as it comes in rows build up below then copy everything once at the end. Duplicate entries for the same hour are detected and skipped automatically.</div>
 
 <div class="card">
   <div class="tabs">
@@ -148,7 +148,7 @@
   <div id="tab-image" style="display:none;">
     <div class="disclaimer">
       <span>⚠️</span>
-      <span><strong>AI image reading can make mistakes</strong> — it's reading pixels, not real data. Always double-check the numbers against the actual screenshot before trusting them, especially for wide tables with lots of columns.</span>
+      <span><strong>AI image reading can make mistakes</strong>  it's reading pixels, not real data. Always double-check the numbers against the actual screenshot before trusting them, especially for wide tables with lots of columns.</span>
     </div>
     <input type="file" id="imageInput" accept="image/*" />
     <div id="ocrStatus" class="msg"></div>
@@ -168,7 +168,7 @@
 
 <div class="card" id="resultsCard" style="display:none;">
   <div class="row" style="justify-content: space-between;">
-    <strong>Accumulated rows — keep pasting more messages, then copy once at the end</strong>
+    <strong>Accumulated rows keep pasting more messages, then copy once at the end</strong>
     <div class="row" style="margin:0;">
       <button class="secondary" onclick="clearAccumulated()">Clear all rows</button>
       <input type="number" id="startRowInput" placeholder="Starting Excel row #" style="width:150px; padding:8px; border-radius:6px; border:1px solid var(--border); background:#0c0e13; color:var(--text); font-size:13px;" />
