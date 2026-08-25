@@ -80,6 +80,54 @@
     background: #0c0e13; color: var(--text); margin-bottom: 10px; font-size: 13px;
   }
   .modal .row { justify-content: flex-end; margin-top: 4px; }
+
+  .disclaimer {
+    background: rgba(245,165,36,0.1);
+    border: 1px solid rgba(245,165,36,0.35);
+    color: var(--warn);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 12px;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  .disclaimer strong { color: var(--warn); }
+
+  .loading-wrap {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: rgba(79,140,255,0.08);
+    border: 1px solid rgba(79,140,255,0.3);
+    border-radius: 8px;
+  }
+  .loading-wrap.show { display: flex; }
+  .spinner {
+    width: 20px; height: 20px; flex-shrink: 0;
+    border: 3px solid rgba(79,140,255,0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { font-size: 13px; color: var(--text); }
+  .loading-bar-track {
+    flex: 1; height: 6px; border-radius: 4px; overflow: hidden;
+    background: rgba(255,255,255,0.08); margin-left: 8px;
+  }
+  .loading-bar-fill {
+    height: 100%; width: 40%; border-radius: 4px;
+    background: linear-gradient(90deg, var(--accent), #8ab4ff);
+    animation: slide 1.2s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
 </style>
 </head>
 <body>
@@ -98,8 +146,17 @@
   </div>
 
   <div id="tab-image" style="display:none;">
+    <div class="disclaimer">
+      <span>⚠️</span>
+      <span><strong>AI image reading can make mistakes</strong> — it's reading pixels, not real data. Always double-check the numbers against the actual screenshot before trusting them, especially for wide tables with lots of columns.</span>
+    </div>
     <input type="file" id="imageInput" accept="image/*" />
     <div id="ocrStatus" class="msg"></div>
+    <div class="loading-wrap" id="loadingWrap">
+      <div class="spinner"></div>
+      <span class="loading-text" id="loadingText">Reading table image with AI...</span>
+      <div class="loading-bar-track"><div class="loading-bar-fill"></div></div>
+    </div>
   </div>
 
   <div class="row">
@@ -562,6 +619,8 @@ function fileToDataURL(file) {
 
 async function runImageRead(file) {
   const statusEl = document.getElementById("ocrStatus");
+  const loadingWrap = document.getElementById("loadingWrap");
+  const loadingText = document.getElementById("loadingText");
 
   if (!WORKER_URL) {
     statusEl.className = "msg err";
@@ -569,13 +628,16 @@ async function runImageRead(file) {
     return null;
   }
 
-  statusEl.className = "msg warn";
-  statusEl.textContent = "Reading table image with AI...";
+  statusEl.className = "msg";
+  statusEl.textContent = "";
+  loadingText.textContent = "Reading table image with AI... this can take a little while for wide tables.";
+  loadingWrap.classList.add("show");
 
   let dataUrl;
   try {
     dataUrl = await fileToDataURL(file);
   } catch (e) {
+    loadingWrap.classList.remove("show");
     statusEl.className = "msg err";
     statusEl.textContent = "Couldn't read the file: " + e.message;
     return null;
@@ -588,15 +650,17 @@ async function runImageRead(file) {
       body: JSON.stringify({ image: dataUrl, canonicalLocations: CANONICAL_LOCATIONS }),
     });
     const data = await res.json();
+    loadingWrap.classList.remove("show");
     if (data.error) {
       statusEl.className = "msg err";
       statusEl.textContent = "AI read failed: " + data.error;
       return null;
     }
     statusEl.className = "msg ok";
-    statusEl.textContent = "Image read successfully.";
+    statusEl.textContent = "Image read successfully — double-check the numbers below against the original screenshot.";
     return data.cleaned || "";
   } catch (e) {
+    loadingWrap.classList.remove("show");
     statusEl.className = "msg err";
     statusEl.textContent = "Request to Worker failed: " + e.message;
     return null;
