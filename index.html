@@ -617,9 +617,9 @@ function copyTSV() {
     btn.textContent = "✓ Copied!";
     statusEl.className = "msg ok";
     if (startRow !== null) {
-      statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s) — Total formulas regenerated for rows ${startRow}–${startRow + accumulatedRows.length - 1}. Still use <strong>Paste Special → Skip Blanks</strong> for column L.`;
+      statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s) — Total formulas regenerated for rows ${startRow}–${startRow + accumulatedRows.length - 1}. <strong>Use Paste Special (Ctrl+Alt+V) → Skip Blanks</strong> when pasting — every blank cell in this row (any location not in this message) will otherwise erase existing data there.`;
     } else {
-      statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s). Enter a starting row number above to also regenerate your Total formula — otherwise column K is left blank and you must use <strong>Paste Special → Skip Blanks</strong> to protect it.`;
+      statusEl.innerHTML = `✓ Copied ${accumulatedRows.length} row(s). <strong>Use Paste Special (Ctrl+Alt+V) → Skip Blanks</strong> when pasting — a normal paste will erase existing data in every blank cell of this row (any location not in this message), not just column K.`;
     }
     setTimeout(() => { btn.textContent = oldBtnText; }, 2500);
   }).catch(err => {
