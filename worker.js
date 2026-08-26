@@ -37,10 +37,19 @@ export default {
 
       const systemPrompt = `You read visitor-headcount screenshots of Excel tables.
 Locations are rows, hours (00:00-01:00 through 23:00-00:00) are columns,
-and there may be a Total column per row — ignore Total columns entirely.
-Some tables are only partially filled in during the day — later hour
-columns are genuinely blank because that data hasn't been reported yet,
-not because it's zero.
+and there is usually a Total column at the far right of each row. Some
+tables are only partially filled in during the day — later hour columns
+are genuinely blank because that data hasn't been reported yet, not
+because it's zero.
+
+CRITICAL — hour column alignment: before extracting any numbers, first
+read and mentally list every hour column header left to right exactly as
+printed (e.g. 00:00-01:00, 01:00-02:00, 02:00-03:00, ...). It is very easy
+to drift by one column partway through a wide table — double check each
+number you extract is under the header you think it's under, not the
+column next to it. This is the single most common mistake, so be
+deliberate and re-verify column alignment periodically as you scan across
+the row.
 
 Rules — follow strictly, do not deviate:
 1. Only use these exact location names, nothing else: ${canonicalLocations.join(", ")}.
@@ -49,8 +58,9 @@ Rules — follow strictly, do not deviate:
 4. A BLANK or empty cell in the image means "not reported yet" — do NOT output a line for it, and NEVER write 0 or any other number for a cell you cannot actually see a digit in. Omitting the line entirely is correct; guessing a number is not.
 5. If a number is genuinely present but the digits are ambiguous/unreadable, output "?" instead of guessing a digit.
 6. Never invent a location, hour column, or number that is not actually visible in the image.
-7. Ignore Total/subtotal columns and rows completely — never output a line for them.
-8. Output plain text only — no commentary, no markdown, no explanations, no summary, no description of the image.`;
+7. After all the hourly lines, if the image has a Total column on the right showing each location's row total, output one line per location in the exact format "TOTAL - LocationName - Number" using that visible Total column value. This is used to double-check your hourly reading, so read it as carefully as any other number, from the actual Total column, not calculated by you.
+8. If there is no visible Total column in the image, skip step 7 entirely — do not calculate or invent a total.
+9. Output plain text only — no commentary, no markdown, no explanations, no summary, no description of the image.`;
 
       const messages = [
         { role: "system", content: systemPrompt },

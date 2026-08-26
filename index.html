@@ -199,8 +199,15 @@
 const ALIAS_KEY = "headcount_aliases_v1";
 
 function loadAliases() {
+  // Every canonical name must always resolve to itself, no matter what —
+  // this was missing for "SUS PSA" and caused it to be silently treated
+  // as an unrecognized location even though the model spelled it exactly
+  // right. Building this map fresh here means it can never happen again,
+  // even for future locations added to CANONICAL_LOCATIONS.
+  const selfMap = {};
+  CANONICAL_LOCATIONS.forEach(loc => { selfMap[normalizeKey(loc)] = loc; });
   const stored = JSON.parse(localStorage.getItem(ALIAS_KEY) || "{}");
-  return Object.assign({}, SEED_ALIASES, stored);
+  return Object.assign({}, selfMap, SEED_ALIASES, stored);
 }
 function saveAlias(normKey, canonicalName) {
   const stored = JSON.parse(localStorage.getItem(ALIAS_KEY) || "{}");
@@ -352,12 +359,63 @@ function splitIntoSegments(raw) {
   return segments;
 }
 
+// Matches a self-check line the vision model emits: "TOTAL - LocationName - Number"
+// using the image's own Total column, so we can verify our hourly extraction
+// actually adds up to what the image itself says for that location.
+const LOCATION_TOTAL_LINE_RE = /^total\s*[-:]\s*(.+?)\s*[-:]\s*(\d{1,6})$/i;
+
 // returns { rows: [...], flags: [...] }
 async function parseRaw(raw) {
-  if (looksLikeLocationTimeSeries(raw)) {
-    return parseLocationTimeSeries(raw);
+  // Pull out any "TOTAL - Location - Number" self-check lines first, and
+  // strip them from the text so they don't confuse the normal parsers.
+  const declaredTotals = {}; // canonicalName -> number
+  const totalFlags = [];
+  const linesForTotals = raw.split(/\r?\n/);
+  const remainingLines = [];
+  const aliasesForTotals = loadAliases();
+  for (const rawLine of linesForTotals) {
+    const cleaned = rawLine.replace(/\*/g, "").trim();
+    const m = cleaned.match(LOCATION_TOTAL_LINE_RE);
+    if (m) {
+      const key = normalizeKeyLocal(m[1]);
+      const canonical = aliasesForTotals[key];
+      if (canonical) {
+        declaredTotals[canonical] = parseInt(m[2], 10);
+      }
+      continue; // don't pass this line into the regular parsers
+    }
+    remainingLines.push(rawLine);
+  }
+  raw = remainingLines.join("\n");
+
+  const result = looksLikeLocationTimeSeries(raw)
+    ? await parseLocationTimeSeries(raw)
+    : await parseRawSegments(raw);
+
+  // Cross-check: sum what we actually extracted per location across all
+  // hour rows in THIS image, and compare against the image's own Total
+  // column value. A mismatch is a strong signal of a misread — most often
+  // an hour-column alignment shift like the one that slipped through
+  // before this check existed.
+  if (Object.keys(declaredTotals).length > 0) {
+    const summed = {};
+    result.rows.forEach(r => {
+      Object.entries(r.values).forEach(([loc, num]) => {
+        summed[loc] = (summed[loc] || 0) + num;
+      });
+    });
+    Object.entries(declaredTotals).forEach(([loc, declared]) => {
+      const actual = summed[loc] || 0;
+      if (actual !== declared) {
+        totalFlags.push(`⚠ Possible misread for "${loc}": hourly values add up to ${actual}, but the image's own Total column shows ${declared}. Column alignment may have shifted — please verify this location's row against the screenshot before trusting it.`);
+      }
+    });
   }
 
+  return { rows: result.rows, flags: [...result.flags, ...totalFlags] };
+}
+
+async function parseRawSegments(raw) {
   const aliases = loadAliases();
   const segments = splitIntoSegments(raw);
   const rows = [];
