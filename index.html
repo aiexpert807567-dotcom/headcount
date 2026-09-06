@@ -75,6 +75,12 @@
   }
   .modal h3 { margin: 0 0 8px; font-size: 15px; }
   .modal p { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .modal .suggestion-box {
+    background: rgba(79,140,255,0.10); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 12px; margin-bottom: 12px;
+  }
+  .modal .suggestion-box p { color: var(--text); margin: 0 0 10px; font-size: 13px; }
+  .modal .suggestion-box b { color: var(--accent); }
   .modal select, .modal input[type=text] {
     width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
     background: #0c0e13; color: var(--text); margin-bottom: 10px; font-size: 13px;
@@ -186,11 +192,25 @@
   <div class="modal">
     <h3 id="modalTitle">Needs your input</h3>
     <p id="modalDesc"></p>
-    <select id="modalSelect"></select>
-    <input type="text" id="modalNewName" placeholder="Or type a new column name..." style="display:none;" />
-    <div class="row">
-      <button class="secondary" onclick="closeModal(null)">Skip this value</button>
-      <button onclick="submitModal()">Save & continue</button>
+
+    <!-- Shown when we have a confident guess at which canonical location this
+         actually is (e.g. a typo, spacing, or formatting difference). Asks the
+         plain yes/no question instead of dumping a bare dropdown on the user. -->
+    <div id="modalSuggestionBox" class="suggestion-box" style="display:none;">
+      <p id="modalSuggestionText"></p>
+      <div class="row">
+        <button onclick="acceptSuggestion()">Yes, move it there</button>
+        <button class="secondary" onclick="showManualPicker()">No, let me pick</button>
+      </div>
+    </div>
+
+    <div id="modalManualBox">
+      <select id="modalSelect"></select>
+      <input type="text" id="modalNewName" placeholder="Or type a new column name..." style="display:none;" />
+      <div class="row">
+        <button class="secondary" onclick="closeModal(null)">Skip this value</button>
+        <button onclick="submitModal()">Save & continue</button>
+      </div>
     </div>
   </div>
 </div>
@@ -471,14 +491,73 @@ async function parseRawSegments(raw) {
   return { rows, flags };
 }
 
+// ---------- Fuzzy matching for near-miss location names ----------
+// Standard edit-distance DP. Operates on the already-normalized keys
+// (spaces/hyphens/punctuation stripped, uppercased) so "Terra-A", "TERRA A"
+// and "terraa" all compare the same way.
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const prev = new Array(n + 1);
+  const curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,      // deletion
+        curr[j - 1] + 1,  // insertion
+        prev[j - 1] + cost // substitution
+      );
+    }
+    for (let j = 0; j <= n; j++) prev[j] = curr[j];
+  }
+  return prev[n];
+}
+
+// Finds the single canonical location a raw, unrecognized name most likely
+// belongs to — this is what lets the modal ask "did you mean X?" instead of
+// just saying "not found, pick from this list". Deliberately conservative:
+// - Requires the closest match to be strictly closer than the second-closest,
+//   so ambiguous cases (e.g. "SA04" sitting equidistant between "SA03" and
+//   "SA05") never produce a confident wrong guess — those fall through to
+//   the plain manual picker instead.
+// - Requires reasonable similarity so a short/unrelated name doesn't get
+//   forced onto some canonical location just because it happened to be the
+//   least-bad option.
+function findClosestCanonical(rawName) {
+  const key = normalizeKeyLocal(rawName);
+  if (!key || key.length < 3) return null;
+  const distances = CANONICAL_LOCATIONS.map(loc => ({
+    loc,
+    dist: levenshtein(key, normalizeKeyLocal(loc)),
+  })).sort((a, b) => a.dist - b.dist);
+
+  const best = distances[0];
+  const secondBest = distances[1];
+  if (!best || best.dist === 0) return null; // exact matches never reach here anyway
+  if (secondBest && secondBest.dist === best.dist) return null; // ambiguous, don't guess
+
+  const maxLen = Math.max(key.length, normalizeKeyLocal(best.loc).length);
+  const similarity = 1 - best.dist / maxLen;
+  if (similarity >= 0.6 && best.dist <= 3) {
+    return { name: best.loc, similarity, distance: best.dist };
+  }
+  return null;
+}
+
 // ---------- Modal for unknown locations ----------
 let modalResolve = null;
+let modalSuggestion = null; // canonical name being suggested, if any
+
 function promptForMapping(rawName, num, hourLabelText) {
   return new Promise(resolve => {
     modalResolve = resolve;
-    document.getElementById("modalTitle").textContent = "Unrecognized location";
-    document.getElementById("modalDesc").textContent =
-      `Found "${rawName}" = ${num} (${hourLabelText || "hour unknown"}). It's not in the master list. What should it map to?`;
+    const suggestion = findClosestCanonical(rawName);
+    modalSuggestion = suggestion ? suggestion.name : null;
+
     const sel = document.getElementById("modalSelect");
     sel.innerHTML = "";
     const optNew = document.createElement("option");
@@ -495,8 +574,41 @@ function promptForMapping(rawName, num, hourLabelText) {
     sel.onchange = () => {
       document.getElementById("modalNewName").style.display = sel.value === "__new__" ? "block" : "none";
     };
+
+    const suggestionBox = document.getElementById("modalSuggestionBox");
+    const manualBox = document.getElementById("modalManualBox");
+
+    if (suggestion) {
+      // Ask the direct, unambiguous question: this raw line looks like it's
+      // actually one of our known locations, just written differently in
+      // this particular report — should it be moved there?
+      document.getElementById("modalTitle").textContent = "Does this belong somewhere else?";
+      document.getElementById("modalDesc").textContent =
+        `Found "${rawName}" = ${num} (${hourLabelText || "hour unknown"}). This isn't one of the ${CANONICAL_LOCATIONS.length} known locations as written.`;
+      document.getElementById("modalSuggestionText").innerHTML =
+        `It looks like it's meant to be <b>"${suggestion.name}"</b> — just spelled or formatted differently in this data. Should this value be recorded under "${suggestion.name}"?`;
+      sel.value = suggestion.name; // pre-select the guess for the "No, let me pick" fallback
+      suggestionBox.style.display = "block";
+      manualBox.style.display = "none";
+    } else {
+      // No confident guess — go straight to the plain "which column is this"
+      // picker rather than pretending there's an obvious answer.
+      document.getElementById("modalTitle").textContent = "Unrecognized location";
+      document.getElementById("modalDesc").textContent =
+        `Found "${rawName}" = ${num} (${hourLabelText || "hour unknown"}). It doesn't match any of the ${CANONICAL_LOCATIONS.length} known locations. What should it map to?`;
+      suggestionBox.style.display = "none";
+      manualBox.style.display = "block";
+    }
+
     document.getElementById("modalBackdrop").classList.add("show");
   });
+}
+function acceptSuggestion() {
+  closeModal(modalSuggestion);
+}
+function showManualPicker() {
+  document.getElementById("modalSuggestionBox").style.display = "none";
+  document.getElementById("modalManualBox").style.display = "block";
 }
 function submitModal() {
   const sel = document.getElementById("modalSelect");
