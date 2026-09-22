@@ -259,7 +259,13 @@ function clearAccumulated() {
 // The "Time"/"Location" keyword is REQUIRED — without it, a bare
 // "06:00 to 07:00" would collide with the per-line hour+value format
 // used in the "location name, then a list of hour = number" reports.
-const TIME_HEADER_RE = /(?:time|location)\s*:?\s*\**\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\s*(?:-|–|to)\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\**/gi;
+// The separator between the two hour values is OPTIONAL — real messages
+// sometimes drop the dash and just leave a space/typo, e.g.
+// "Time: 2000hrs  2100hrs". Without this, that header silently fails to
+// match at all, and its location lines get merged into the PREVIOUS
+// still-open segment (overwriting that hour's values) instead of
+// starting a new one — this is what caused the 2000-2100 hour to vanish.
+const TIME_HEADER_RE = /(?:time|location)\s*:?\s*\**\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\s*(?:-|–|to)?\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\**/gi;
 
 // Matches a standalone "06:00 to 07:00 = 65" line — used by the
 // location-name-then-hourly-values report format.
@@ -345,7 +351,7 @@ async function parseLocationTimeSeries(raw) {
   }
 
   const rows = Object.entries(byHour).map(([label, values]) => ({ label, values }));
-  return { rows, flags };
+  return { rows, flags, unmatchedLines: [] };
 }
 
 function hourLabel(h1, m1, h2, m2) {
@@ -432,14 +438,22 @@ async function parseRaw(raw) {
     });
   }
 
-  return { rows: result.rows, flags: [...result.flags, ...totalFlags] };
+  return { rows: result.rows, flags: [...result.flags, ...totalFlags], unmatchedLines: result.unmatchedLines || [] };
 }
+
+// Lines that are expected NOT to parse as a location/number and are not a
+// sign of a confusing/broken format — normal WhatsApp report boilerplate.
+// Kept deliberately small: anything NOT matched here that also fails to
+// parse is treated as a genuine confusion signal (see unmatchedLines below),
+// which is what triggers the AI reformatting fallback in runParse().
+const NOISE_LINE_RE = /^(regards?|thanks?|thank you|good\s*(morning|evening|afternoon|night)|locations?\s+and\s+headcount:?|[-=_*~]{3,})$/i;
 
 async function parseRawSegments(raw) {
   const aliases = loadAliases();
   const segments = splitIntoSegments(raw);
   const rows = [];
   const flags = [];
+  const unmatchedLines = []; // substantive lines that didn't parse as loc/total/skip/noise
 
   for (const seg of segments) {
     const lines = seg.body.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
@@ -449,7 +463,11 @@ async function parseRawSegments(raw) {
 
     for (const line of lines) {
       const r = parseLine(line);
-      if (!r || r.type === "skip" || r.type === "unmatched") continue; // decorative lines, dates, "Regards" etc.
+      if (!r || r.type === "skip") continue; // decorative lines, dates, etc.
+      if (r.type === "unmatched") {
+        if (!NOISE_LINE_RE.test(r.line)) unmatchedLines.push(r.line);
+        continue;
+      }
       if (r.type === "total") {
         statedTotal = r.value;
         continue;
@@ -488,7 +506,7 @@ async function parseRawSegments(raw) {
     }
   }
 
-  return { rows, flags };
+  return { rows, flags, unmatchedLines };
 }
 
 // ---------- Fuzzy matching for near-miss location names ----------
@@ -756,9 +774,36 @@ async function runParse() {
   }
 
   msgEl.textContent = "Parsing...";
-  const { rows, flags: parseFlags } = await parseRaw(raw);
+  let { rows, flags: parseFlags, unmatchedLines } = await parseRaw(raw);
+
+  // The strict parser is deliberately picky — that's what makes well-formed
+  // messages parse instantly for free with zero AI involvement. Only when
+  // it's actually confused (found nothing at all, or hit lines it couldn't
+  // make sense of) do we fall back to asking the Worker's AI to reformat
+  // the text, then re-run this SAME strict parser on the AI's output — the
+  // AI never supplies numbers directly, it only untangles formatting.
+  const looksConfused = activeTab === "text" && (rows.length === 0 || unmatchedLines.length > 0);
+  if (looksConfused) {
+    msgEl.textContent = rows.length === 0
+      ? "Couldn't read that format directly — asking AI to help clean it up..."
+      : `${unmatchedLines.length} line(s) look off — asking AI to double-check them...`;
+    const repaired = await runTextRepair(raw);
+    if (repaired) {
+      const retry = await parseRaw(repaired);
+      if (retry.rows.length > 0) {
+        rows = retry.rows;
+        parseFlags = [
+          "AI reformatted some unclear lines before parsing — please double-check the numbers below against your original message.",
+          ...retry.flags,
+        ];
+      }
+      // If the AI-repaired retry still found nothing, fall through and
+      // keep whatever the direct parse already had (possibly still empty).
+    }
+  }
+
   if (rows.length === 0) {
-    msgEl.textContent = "Couldn't find any recognizable rows in this message. Check the format and try again.";
+    msgEl.textContent = "Couldn't find any recognizable rows in this message, even with AI help. Check the format and try again.";
     return;
   }
   const mergeFlags = mergeRows(rows);
@@ -785,6 +830,26 @@ function fileToDataURL(file) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+// Sends raw pasted text to the Worker's AI text-repair endpoint, which
+// reformats (but never invents/changes numbers in) messy or inconsistently
+// formatted lines so the strict parser above can read them. Returns the
+// reformatted text, or null on any failure (caller falls back gracefully).
+async function runTextRepair(raw) {
+  if (!WORKER_URL) return null;
+  try {
+    const res = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rawText: raw, canonicalLocations: CANONICAL_LOCATIONS }),
+    });
+    const data = await res.json();
+    if (data.error || !data.cleaned) return null;
+    return data.cleaned;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function runImageRead(file) {
