@@ -7,18 +7,29 @@ built up across as many messages as you paste in before copying once.
 ## How it works
 
 1. **Text messages** (any of the formats you've been getting — dash, colon,
-   bullet) are parsed **entirely offline**, with strict regex against the
-   35-column master schema in `schema.js`. No API calls, no cost, no
-   internet dependency for this path.
+   bullet) are parsed **entirely offline first**, with strict regex against
+   the 35-column master schema in `schema.js`. No API calls, no cost, no
+   internet dependency for this path — and it's what handles the vast
+   majority of well-formed messages instantly.
 
-2. **Images** go through OCR (Tesseract.js, in-browser) automatically, then
-   — if you've deployed the Worker — the raw OCR text is automatically
-   sent to Cloudflare Workers AI to be reformatted into clean lines before
-   parsing. No button to press; it just happens. The Worker is told never
-   to invent or guess numbers, only to reformat what's actually there, and
-   to leave `?` for anything unreadable so it still gets flagged instead
-   of silently being wrong. If the Worker isn't deployed/configured yet,
-   it falls back to using the raw OCR text directly.
+   If that strict parser can't make sense of something (a missing dash in
+   an hour header, a typo, an inconsistent format, a spelled-out number) —
+   instead of erroring out, it automatically falls back to asking the
+   Worker's AI to **reformat** the confusing lines (never to supply numbers
+   of its own), then re-runs the exact same strict parser on the result.
+   So the numbers you see always came from the deterministic parser
+   reading real digits, never from the AI's own judgment — the AI only
+   untangles formatting it's confused about. This only fires when needed;
+   a normal well-formatted message never touches the AI.
+
+2. **Images** are read directly by a vision-language model (currently
+   Llama 4 Scout on Cloudflare Workers AI) — no separate OCR step. Reading
+   the table directly avoids the old failure mode where OCR would garble a
+   dense grid and a cleanup step had no way to recover from already-
+   corrupted input. The model is told never to invent or guess numbers,
+   only to transcribe what's actually visible, and to leave `?` for
+   anything unreadable so it still gets flagged instead of silently being
+   wrong.
 
 3. **Multiple messages accumulate.** Every time you hit "Parse & Add
    row(s)", the new rows are merged into a running table instead of
@@ -142,11 +153,13 @@ memory (e.g. switching browsers), it's under key `headcount_aliases_v1`.
 - If you ever add a genuinely new physical location permanently (not just
   an alias), add it to `CANONICAL_LOCATIONS` in `schema.js` directly so
   it's there for everyone, not just remembered in one browser.
-- The OCR step (Tesseract) runs entirely in the browser. The cleaned-up
-  text is the only thing sent to your Worker — never the image itself.
+- Images are sent to your Worker as-is (base64) for the vision model to
+  read directly — there's no separate in-browser OCR step anymore. Text
+  messages, by contrast, are only ever sent to the Worker if the offline
+  parser gets confused; a normal well-formatted message never leaves the
+  browser at all.
 - Accumulated rows live in memory only (cleared on page refresh) — copy
   them out before closing the tab. If you want them to survive a refresh
   too, that's a small change to persist `accumulatedRows` to
   `localStorage` the same way aliases already are — say the word if you
   want that added.
-
