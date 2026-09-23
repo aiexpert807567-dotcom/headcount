@@ -255,17 +255,17 @@ function clearAccumulated() {
 // ---------- Parsing ----------
 
 // Matches time headers like:
-// "Time: 1800hrs -1900hrs", "Location: *1800 - 1900*"
-// The "Time"/"Location" keyword is REQUIRED — without it, a bare
-// "06:00 to 07:00" would collide with the per-line hour+value format
-// used in the "location name, then a list of hour = number" reports.
+// "Time: 1800hrs -1900hrs", "Location: *1800 - 1900*", "Duration: *2300 - 0000*"
+// The keyword is REQUIRED — without it, a bare "06:00 to 07:00" would
+// collide with the per-line hour+value format used in the "location name,
+// then a list of hour = number" reports.
 // The separator between the two hour values is OPTIONAL — real messages
 // sometimes drop the dash and just leave a space/typo, e.g.
 // "Time: 2000hrs  2100hrs". Without this, that header silently fails to
 // match at all, and its location lines get merged into the PREVIOUS
 // still-open segment (overwriting that hour's values) instead of
 // starting a new one — this is what caused the 2000-2100 hour to vanish.
-const TIME_HEADER_RE = /(?:time|location)\s*:?\s*\**\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\s*(?:-|–|to)?\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\**/gi;
+const TIME_HEADER_RE = /(?:time|location|duration)\s*:?\s*\**\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\s*(?:-|–|to)?\s*(\d{1,2}):?(\d{2})\s*(?:hrs)?\**/gi;
 
 // Matches a standalone "06:00 to 07:00 = 65" line — used by the
 // location-name-then-hourly-values report format.
@@ -390,8 +390,12 @@ function splitIntoSegments(raw) {
 // actually adds up to what the image itself says for that location.
 const LOCATION_TOTAL_LINE_RE = /^total\s*[-:]\s*(.+?)\s*[-:]\s*(\d{1,6})$/i;
 
-// returns { rows: [...], flags: [...] }
-async function parseRaw(raw) {
+// returns { rows: [...], flags: [...], unmatchedLines: [...] }
+// onStatus, if given, is called with short progress strings ("Parsing...",
+// "asking AI...") so the caller can show them without parseRaw touching the DOM.
+async function parseRaw(raw, onStatus) {
+  const say = onStatus || (() => {});
+
   // Pull out any "TOTAL - Location - Number" self-check lines first, and
   // strip them from the text so they don't confuse the normal parsers.
   const declaredTotals = {}; // canonicalName -> number
@@ -414,9 +418,53 @@ async function parseRaw(raw) {
   }
   raw = remainingLines.join("\n");
 
-  const result = looksLikeLocationTimeSeries(raw)
-    ? await parseLocationTimeSeries(raw)
-    : await parseRawSegments(raw);
+  let rows, flags;
+
+  if (looksLikeLocationTimeSeries(raw)) {
+    // Different report format (location name, then a run of hour=value
+    // lines) — rare enough, and different enough in shape, that it isn't
+    // wired into the AI-retry path below. Still fully functional as before.
+    const result = await parseLocationTimeSeries(raw);
+    rows = result.rows;
+    flags = result.flags;
+  } else {
+    // Deterministic pass, no AI, no interactive prompts yet.
+    let det = parseSegmentsDeterministic(raw);
+
+    // Confusion signals, in order of how strongly they indicate the parser
+    // is actually stuck (vs. just encountering a genuinely-new location
+    // name, which is normal and handled by the interactive prompt below):
+    //  - a segment whose header word wasn't recognized at all
+    //  - a substantive line that produced no number at all
+    //  - nothing usable came out at all
+    const nothingUsable = det.pendingRows.length === 0
+      || det.pendingRows.every(r => Object.keys(r.values).length === 0 && r.unresolved.length === 0);
+    const looksConfused = det.headerlessBodies.length > 0 || det.unmatchedLines.length > 0 || nothingUsable;
+
+    if (looksConfused) {
+      say(nothingUsable
+        ? "Couldn't read that format directly — asking AI to help clean it up..."
+        : "Some lines look off — asking AI to double-check them...");
+      const repaired = await runTextRepair(raw);
+      if (repaired) {
+        const det2 = parseSegmentsDeterministic(repaired);
+        const det2Usable = det2.pendingRows.some(r => Object.keys(r.values).length > 0 || r.unresolved.length > 0);
+        if (det2.headerlessBodies.length === 0 && det2Usable) {
+          det = det2;
+          det.flags = [
+            "AI reformatted some unclear lines before parsing — please double-check the numbers below against your original message.",
+            ...det2.flags,
+          ];
+        }
+        // If the AI-repaired retry didn't actually improve things, silently
+        // keep the original deterministic result rather than the AI's output.
+      }
+      say("Parsing...");
+    }
+
+    rows = await resolveUnresolved(det.pendingRows, det.flags);
+    flags = det.flags;
+  }
 
   // Cross-check: sum what we actually extracted per location across all
   // hour rows in THIS image, and compare against the image's own Total
@@ -425,7 +473,7 @@ async function parseRaw(raw) {
   // before this check existed.
   if (Object.keys(declaredTotals).length > 0) {
     const summed = {};
-    result.rows.forEach(r => {
+    rows.forEach(r => {
       Object.entries(r.values).forEach(([loc, num]) => {
         summed[loc] = (summed[loc] || 0) + num;
       });
@@ -438,25 +486,51 @@ async function parseRaw(raw) {
     });
   }
 
-  return { rows: result.rows, flags: [...result.flags, ...totalFlags], unmatchedLines: result.unmatchedLines || [] };
+  return { rows, flags: [...flags, ...totalFlags], unmatchedLines: [] };
 }
 
 // Lines that are expected NOT to parse as a location/number and are not a
 // sign of a confusing/broken format — normal WhatsApp report boilerplate.
 // Kept deliberately small: anything NOT matched here that also fails to
-// parse is treated as a genuine confusion signal (see unmatchedLines below),
-// which is what triggers the AI reformatting fallback in runParse().
+// parse is treated as a genuine confusion signal, which is what triggers
+// the AI reformatting fallback in parseRaw().
 const NOISE_LINE_RE = /^(regards?|thanks?|thank you|good\s*(morning|evening|afternoon|night)|locations?\s+and\s+headcount:?|[-=_*~]{3,})$/i;
 
-async function parseRawSegments(raw) {
+// Deterministic pass only — no AI, no interactive prompts. Splits into
+// hour segments and parses each line, but does NOT resolve unrecognized
+// location names here; those are returned as "pending" so the caller can
+// decide whether to try AI reformatting BEFORE bothering the user with an
+// interactive prompt (this ordering is what makes the AI fallback actually
+// useful — resolving inline here would show the popup before AI ever got a
+// chance to look at the text).
+//
+// A segment whose header word wasn't recognized at all (e.g. a report using
+// "Duration:" before that word was added to TIME_HEADER_RE) is never turned
+// into fake location rows — its lines almost always aren't location=number
+// pairs at all (e.g. "Duration: 2300 - 0000" itself looks like one purely
+// by coincidence, since it ends in a number). Instead the whole body is
+// reported via headerlessBodies, which is treated as a strong confusion
+// signal that should go to AI before anything else.
+function parseSegmentsDeterministic(raw) {
   const aliases = loadAliases();
   const segments = splitIntoSegments(raw);
-  const rows = [];
+  const pendingRows = []; // { label, values, unresolved: [{rawName,key,num}], statedTotal }
   const flags = [];
-  const unmatchedLines = []; // substantive lines that didn't parse as loc/total/skip/noise
+  const unmatchedLines = [];
+  const headerlessBodies = [];
 
   for (const seg of segments) {
     const lines = seg.body.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+    if (seg.label === null) {
+      const substantive = lines.filter(l => {
+        const r = parseLine(l);
+        return !(r && r.type === "skip");
+      });
+      if (substantive.length > 0) headerlessBodies.push(substantive.join("\n"));
+      continue; // never guess locations out of an unrecognized header block
+    }
+
     const values = {}; // canonical name -> number
     let statedTotal = null;
     const unresolved = [];
@@ -482,31 +556,40 @@ async function parseRawSegments(raw) {
       }
     }
 
-    // Resolve unknowns interactively
-    for (const u of unresolved) {
-      const resolved = await promptForMapping(u.rawName, u.num, seg.label);
-      if (resolved) {
-        values[resolved] = u.num;
-        saveAlias(u.key, resolved);
-      } else {
-        flags.push(`Skipped unrecognized location "${u.rawName}" (${seg.label || "unknown hour"})`);
-      }
-    }
-
-    // Validate against stated total if present
-    if (statedTotal !== null) {
-      const sum = Object.values(values).reduce((a, b) => a + b, 0);
-      if (sum !== statedTotal) {
-        flags.push(`Total mismatch for ${seg.label || "segment"}: parsed sum = ${sum}, message says ${statedTotal}. Values kept as parsed — please double-check.`);
-      }
-    }
-
-    if (Object.keys(values).length > 0) {
-      rows.push({ label: seg.label || "(hour not detected)", values });
-    }
+    pendingRows.push({ label: seg.label, values, unresolved, statedTotal });
   }
 
-  return { rows, flags, unmatchedLines };
+  return { pendingRows, flags, unmatchedLines, headerlessBodies };
+}
+
+// Interactive phase — resolves any unrecognized location names left over
+// from parseSegmentsDeterministic (or from an AI-repaired retry of it) by
+// prompting the user, and validates each segment's parsed sum against any
+// stated total. Only reaches the user for names that are genuinely novel,
+// not for whole blocks the parser never understood in the first place.
+async function resolveUnresolved(pendingRows, flags) {
+  const rows = [];
+  for (const row of pendingRows) {
+    for (const u of row.unresolved) {
+      const resolved = await promptForMapping(u.rawName, u.num, row.label);
+      if (resolved) {
+        row.values[resolved] = u.num;
+        saveAlias(u.key, resolved);
+      } else {
+        flags.push(`Skipped unrecognized location "${u.rawName}" (${row.label || "unknown hour"})`);
+      }
+    }
+    if (row.statedTotal !== null) {
+      const sum = Object.values(row.values).reduce((a, b) => a + b, 0);
+      if (sum !== row.statedTotal) {
+        flags.push(`Total mismatch for ${row.label || "segment"}: parsed sum = ${sum}, message says ${row.statedTotal}. Values kept as parsed — please double-check.`);
+      }
+    }
+    if (Object.keys(row.values).length > 0) {
+      rows.push({ label: row.label || "(hour not detected)", values: row.values });
+    }
+  }
+  return rows;
 }
 
 // ---------- Fuzzy matching for near-miss location names ----------
@@ -773,34 +856,9 @@ async function runParse() {
     if (!raw) return;
   }
 
+  const onStatus = activeTab === "text" ? (t) => { msgEl.textContent = t; } : null;
   msgEl.textContent = "Parsing...";
-  let { rows, flags: parseFlags, unmatchedLines } = await parseRaw(raw);
-
-  // The strict parser is deliberately picky — that's what makes well-formed
-  // messages parse instantly for free with zero AI involvement. Only when
-  // it's actually confused (found nothing at all, or hit lines it couldn't
-  // make sense of) do we fall back to asking the Worker's AI to reformat
-  // the text, then re-run this SAME strict parser on the AI's output — the
-  // AI never supplies numbers directly, it only untangles formatting.
-  const looksConfused = activeTab === "text" && (rows.length === 0 || unmatchedLines.length > 0);
-  if (looksConfused) {
-    msgEl.textContent = rows.length === 0
-      ? "Couldn't read that format directly — asking AI to help clean it up..."
-      : `${unmatchedLines.length} line(s) look off — asking AI to double-check them...`;
-    const repaired = await runTextRepair(raw);
-    if (repaired) {
-      const retry = await parseRaw(repaired);
-      if (retry.rows.length > 0) {
-        rows = retry.rows;
-        parseFlags = [
-          "AI reformatted some unclear lines before parsing — please double-check the numbers below against your original message.",
-          ...retry.flags,
-        ];
-      }
-      // If the AI-repaired retry still found nothing, fall through and
-      // keep whatever the direct parse already had (possibly still empty).
-    }
-  }
+  const { rows, flags: parseFlags } = await parseRaw(raw, onStatus);
 
   if (rows.length === 0) {
     msgEl.textContent = "Couldn't find any recognizable rows in this message, even with AI help. Check the format and try again.";
