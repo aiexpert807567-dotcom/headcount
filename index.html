@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Hourly Headcount → Excel</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="schema.js"></script>
 <style>
   :root {
@@ -134,9 +135,32 @@
     0% { transform: translateX(-100%); }
     100% { transform: translateX(350%); }
   }
+
+  /* ---- auth gate ---- */
+  body.locked > *:not(#authGate) { display: none !important; }
+  #authGate { display: none; min-height: 80vh; align-items: center; justify-content: center; }
+  body.locked #authGate { display: flex; }
+  #authGate .box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 100%; max-width: 340px; }
+  #authGate h2 { margin: 0 0 4px; }
+  #authGate input { width: 100%; box-sizing: border-box; margin: 8px 0; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: inherit; font-size: 15px; }
+  #authGate button { width: 100%; margin-top: 8px; }
+  #authMsg { color: #ff6b6b; font-size: 13px; min-height: 18px; }
+  #logoutBtn { position: fixed; top: 10px; right: 12px; z-index: 50; padding: 6px 12px; font-size: 12px; }
 </style>
 </head>
-<body>
+<body class="locked">
+
+<div id="authGate">
+  <div class="box">
+    <h2>Sign in</h2>
+    <div class="sub" style="margin-bottom:8px;">Hourly Headcount → Excel</div>
+    <input type="email" id="authEmail" placeholder="Email" autocomplete="username" />
+    <input type="password" id="authPass" placeholder="Password" autocomplete="current-password" />
+    <div id="authMsg"></div>
+    <button onclick="signIn()">Sign in</button>
+  </div>
+</div>
+<button id="logoutBtn" class="secondary" onclick="signOut()">Log out</button>
 
 <h1>Hourly Headcount → Excel</h1>
 <div class="sub">Paste a WhatsApp report or upload the screenshot. Parse each message as it comes in rows build up below then copy everything once at the end. Duplicate entries for the same hour are detected and skipped automatically.</div>
@@ -216,6 +240,40 @@
 </div>
 
 <script>
+// ---------- Supabase auth (login gate) ----------
+// These two values are PUBLIC by design (publishable/anon key). Never put the service_role key here.
+const SUPABASE_URL = "https://vqspycbjawzjgassjtsx.supabase.co";
+const SUPABASE_KEY = "sb_publishable_fHUtCq5mEzCG1QlO-KfpKg_o7WIxB4F";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+function setLocked(locked) { document.body.classList.toggle("locked", locked); }
+
+async function getToken() {
+  const { data } = await sb.auth.getSession();
+  return data.session ? data.session.access_token : null;
+}
+async function authHeaders() {
+  const t = await getToken();
+  return { "Content-Type": "application/json", ...(t ? { Authorization: "Bearer " + t } : {}) };
+}
+async function signIn() {
+  const msg = document.getElementById("authMsg");
+  msg.textContent = "";
+  const { error } = await sb.auth.signInWithPassword({
+    email: document.getElementById("authEmail").value.trim(),
+    password: document.getElementById("authPass").value,
+  });
+  if (error) { msg.textContent = error.message; return; }
+  document.getElementById("authPass").value = "";
+}
+async function signOut() { await sb.auth.signOut(); }
+
+sb.auth.onAuthStateChange((_event, session) => setLocked(!session));
+sb.auth.getSession().then(({ data }) => setLocked(!data.session));
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter" && document.body.classList.contains("locked")) signIn();
+});
+
 const ALIAS_KEY = "headcount_aliases_v1";
 
 function loadAliases() {
@@ -899,9 +957,10 @@ async function runTextRepair(raw) {
   try {
     const res = await fetch(WORKER_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await authHeaders(),
       body: JSON.stringify({ rawText: raw, canonicalLocations: CANONICAL_LOCATIONS }),
     });
+    if (res.status === 401) { await signOut(); return null; }
     const data = await res.json();
     if (data.error || !data.cleaned) return null;
     return data.cleaned;
@@ -939,9 +998,10 @@ async function runImageRead(file) {
   try {
     const res = await fetch(WORKER_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await authHeaders(),
       body: JSON.stringify({ image: dataUrl, canonicalLocations: CANONICAL_LOCATIONS }),
     });
+    if (res.status === 401) { loadingWrap.classList.remove("show"); await signOut(); return null; }
     const data = await res.json();
     loadingWrap.classList.remove("show");
     if (data.error) {
