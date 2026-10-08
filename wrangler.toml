@@ -4,3 +4,7 @@ compatibility_date = "2026-01-01"
 
 [ai]
 binding = "AI"
+
+[vars]
+SUPABASE_URL = "https://vqspycbjawzjgassjtsx.supabase.co"
+SUPABASE_ANON_KEY = "sb_publishable_fHUtCq5mEzCG1QlO-KfpKg_o7WIxB4F"

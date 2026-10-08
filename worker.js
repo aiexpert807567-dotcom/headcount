@@ -46,6 +46,11 @@ export default {
         return json({ error: "POST only" }, 405);
       }
 
+      // Only signed-in Supabase users may use the AI endpoints.
+      if (!(await verifyUser(request, env))) {
+        return json({ error: "Unauthorized — please sign in" }, 401);
+      }
+
       let body;
       try {
         body = await request.json();
@@ -180,11 +185,25 @@ Rules — follow strictly, do not deviate:
   return json({ cleaned }, 200);
 }
 
+// Asks Supabase whether the bearer token is a valid, current session.
+async function verifyUser(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  if (!auth.startsWith("Bearer ") || !env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) return false;
+  try {
+    const res = await fetch(env.SUPABASE_URL + "/auth/v1/user", {
+      headers: { Authorization: auth, apikey: env.SUPABASE_ANON_KEY },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
   };
 }
 
